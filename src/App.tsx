@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+﻿import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import './App.css'
 
 type RoleKey = 'seer' | 'medium' | 'guard'
@@ -6,6 +6,7 @@ type RoleKey = 'seer' | 'medium' | 'guard'
 type Participant = {
   id: string
   name: string
+  score: number
   note: string
 }
 
@@ -26,12 +27,28 @@ type RoleResult = {
 }
 
 type DayVotes = Record<string, string>
-type RunoffDay = {
+type RunoffRound = {
   candidateIds: string[]
   votes: DayVotes
 }
+type RunoffDay = {
+  rounds: RunoffRound[]
+}
+type SelfRole = '人狼' | '狂人' | '占い師' | '霊媒師' | '騎士' | '村人'
+type SavedBoardData = {
+  version: 1 | 2
+  participants: Participant[]
+  days: DayRecord[]
+  roleTracks: Record<RoleKey, RoleTrack[]>
+  votesByDay: DayVotes[]
+  runoffByDay: (RunoffDay | null)[]
+  activeVoteDayIndex: number
+  freeMemo: string
+}
 
 const ROLE_KEYS: RoleKey[] = ['seer', 'medium', 'guard']
+const RESULT_VALUES = new Set(['白', '黒', '結果なし'])
+const SELF_ROLE_OPTIONS: SelfRole[] = ['人狼', '狂人', '占い師', '霊媒師', '騎士', '村人']
 
 const ROLE_LABELS: Record<RoleKey, string> = {
   seer: '占い師',
@@ -82,7 +99,7 @@ const normalizeVisibleDays = (source: DayRecord[]): DayRecord[] => {
 
 const normalizeTextNames = (text: string): string[] =>
   text
-    .split(/[\r\n,、，\t ]+/)
+    .split(/[\r\n]+/)
     .map((name) => name.trim())
     .filter((name) => name.length > 0)
 
@@ -183,8 +200,10 @@ const normalizeRunoffByDay = (source: (RunoffDay | null)[], dayCount: number): (
   const next = source.slice(0, dayCount).map((runoff) =>
     runoff
       ? {
-          candidateIds: [...runoff.candidateIds],
-          votes: { ...runoff.votes },
+          rounds: runoff.rounds.map((round) => ({
+            candidateIds: [...round.candidateIds],
+            votes: { ...round.votes },
+          })),
         }
       : null,
   )
@@ -201,15 +220,23 @@ const pruneRunoffByValidIds = (
   if (!runoff) {
     return null
   }
-  const candidateIds = runoff.candidateIds.filter((id) => validIds.has(id))
-  if (candidateIds.length < 2) {
+  const rounds = runoff.rounds
+    .map((round) => {
+      const candidateIds = round.candidateIds.filter((id) => validIds.has(id))
+      if (candidateIds.length < 2) {
+        return null
+      }
+      const candidateSet = new Set(candidateIds)
+      const votes = Object.fromEntries(
+        Object.entries(round.votes).filter(([fromId, toId]) => validIds.has(fromId) && candidateSet.has(toId)),
+      )
+      return { candidateIds, votes }
+    })
+    .filter((round): round is RunoffRound => round !== null)
+  if (rounds.length === 0) {
     return null
   }
-  const candidateSet = new Set(candidateIds)
-  const votes = Object.fromEntries(
-    Object.entries(runoff.votes).filter(([fromId, toId]) => validIds.has(fromId) && candidateSet.has(toId)),
-  )
-  return { candidateIds, votes }
+  return { rounds }
 }
 
 const areStringArraysEqual = (left: string[], right: string[]): boolean =>
@@ -221,6 +248,189 @@ const areVoteMapsEqual = (left: DayVotes, right: DayVotes): boolean => {
     return false
   }
   return leftEntries.every(([fromId, toId]) => right[fromId] === toId)
+}
+
+const areRunoffRoundsEqual = (left: RunoffRound[], right: RunoffRound[]): boolean =>
+  left.length === right.length &&
+  left.every(
+    (round, index) =>
+      areStringArraysEqual(round.candidateIds, right[index]?.candidateIds ?? []) &&
+      areVoteMapsEqual(round.votes, right[index]?.votes ?? {}),
+  )
+
+const clampParticipantScore = (value: number): number => {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  return Math.max(0, Math.min(10, Math.round(value)))
+}
+
+const isPlayerDeadBeforeDay = (days: DayRecord[], playerId: string, dayIndex: number): boolean => {
+  if (!playerId) {
+    return false
+  }
+  for (let i = 0; i < dayIndex; i += 1) {
+    const day = days[i]
+    if (!day) {
+      continue
+    }
+    if (day.executedId === playerId || day.bittenId === playerId) {
+      return true
+    }
+  }
+  return false
+}
+
+const getTodayLocalDateString = (): string => {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const toObject = (value: unknown): Record<string, unknown> | null =>
+  typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null
+
+const normalizeImportedParticipants = (source: unknown): Participant[] => {
+  if (!Array.isArray(source)) {
+    return []
+  }
+  return source
+    .map((item) => {
+      const obj = toObject(item)
+      if (!obj) {
+        return null
+      }
+      const id = typeof obj.id === 'string' && obj.id ? obj.id : crypto.randomUUID()
+      const name = typeof obj.name === 'string' && obj.name.trim() ? obj.name.trim() : '名前未設定'
+      const score = clampParticipantScore(Number(obj.score))
+      const note = typeof obj.note === 'string' ? obj.note : ''
+      return { id, name, score, note }
+    })
+    .filter((item): item is Participant => item !== null)
+}
+
+const normalizeImportedDays = (source: unknown): DayRecord[] => {
+  if (!Array.isArray(source)) {
+    return [createDayRecord(), createDayRecord()]
+  }
+  const mapped = source.map((item) => {
+    const obj = toObject(item)
+    return {
+      executedId: typeof obj?.executedId === 'string' ? obj.executedId : '',
+      bittenId: typeof obj?.bittenId === 'string' ? obj.bittenId : '',
+    }
+  })
+  return normalizeVisibleDays(mapped)
+}
+
+const normalizeImportedTracks = (source: unknown, dayCount: number): Record<RoleKey, RoleTrack[]> => {
+  const roleTracksObject = toObject(source)
+  const normalizeRole = (role: RoleKey): RoleTrack[] => {
+    const raw = roleTracksObject?.[role]
+    if (!Array.isArray(raw)) {
+      return [createRoleTrack(dayCount)]
+    }
+    const tracks = raw
+      .map((item) => {
+        const obj = toObject(item)
+        if (!obj) {
+          return null
+        }
+        const results = Array.isArray(obj.results)
+          ? obj.results.map((resultItem) => {
+              const resultObj = toObject(resultItem)
+              const targetId = typeof resultObj?.targetId === 'string' ? resultObj.targetId : ''
+              const resultValue = typeof resultObj?.result === 'string' && RESULT_VALUES.has(resultObj.result)
+                ? resultObj.result
+                : '結果なし'
+              return {
+                targetId,
+                result: resultValue,
+              }
+            })
+          : []
+        return {
+          id: typeof obj.id === 'string' && obj.id ? obj.id : crypto.randomUUID(),
+          playerId: typeof obj.playerId === 'string' ? obj.playerId : '',
+          results,
+        }
+      })
+      .filter((item): item is RoleTrack => item !== null)
+    if (tracks.length === 0) {
+      return [createRoleTrack(dayCount)]
+    }
+    return normalizeTracks(tracks, dayCount)
+  }
+
+  return {
+    seer: normalizeRole('seer'),
+    medium: normalizeRole('medium'),
+    guard: normalizeRole('guard'),
+  }
+}
+
+const normalizeImportedVotesByDay = (source: unknown, dayCount: number): DayVotes[] => {
+  if (!Array.isArray(source)) {
+    return normalizeVotesByDay([], dayCount)
+  }
+  const mapped = source.map((item) => {
+    const obj = toObject(item)
+    if (!obj) {
+      return {}
+    }
+    return Object.fromEntries(
+      Object.entries(obj)
+        .filter(([, toId]) => typeof toId === 'string')
+        .map(([fromId, toId]) => [fromId, toId as string]),
+    )
+  })
+  return normalizeVotesByDay(mapped, dayCount)
+}
+
+const normalizeImportedRunoffByDay = (source: unknown, dayCount: number): (RunoffDay | null)[] => {
+  if (!Array.isArray(source)) {
+    return normalizeRunoffByDay([], dayCount)
+  }
+  const mapped = source.map((item) => {
+    if (item === null) {
+      return null
+    }
+    const obj = toObject(item)
+    if (!obj) {
+      return null
+    }
+    const roundsRaw = Array.isArray(obj.rounds) ? obj.rounds : [obj]
+    const rounds = roundsRaw
+      .map((roundItem) => {
+        const roundObj = toObject(roundItem)
+        if (!roundObj) {
+          return null
+        }
+        const candidateIds = Array.isArray(roundObj.candidateIds)
+          ? roundObj.candidateIds.filter((id): id is string => typeof id === 'string')
+          : []
+        const votesObj = toObject(roundObj.votes)
+        const votes = votesObj
+          ? Object.fromEntries(
+              Object.entries(votesObj)
+                .filter(([, toId]) => typeof toId === 'string')
+                .map(([fromId, toId]) => [fromId, toId as string]),
+            )
+          : {}
+        if (candidateIds.length < 2) {
+          return null
+        }
+        return { candidateIds, votes }
+      })
+      .filter((round): round is RunoffRound => round !== null)
+    if (rounds.length === 0) {
+      return null
+    }
+    return { rounds }
+  })
+  return normalizeRunoffByDay(mapped, dayCount)
 }
 
 function App() {
@@ -245,19 +455,28 @@ function App() {
   const [hoverVoteTargetId, setHoverVoteTargetId] = useState<string | null>(null)
   const [layoutTick, setLayoutTick] = useState(0)
   const [isRunoffPopupOpen, setIsRunoffPopupOpen] = useState(false)
+  const [activeRunoffRoundIndex, setActiveRunoffRoundIndex] = useState(0)
 
   const [isImportOpen, setIsImportOpen] = useState(false)
   const [importText, setImportText] = useState('')
+  const [selfRole, setSelfRole] = useState<SelfRole>('村人')
+  const [isExportOpen, setIsExportOpen] = useState(false)
+  const [exportResult, setExportResult] = useState<'○' | '●'>('○')
+  const [exportDate, setExportDate] = useState(getTodayLocalDateString())
+  const [exportMatchNumber, setExportMatchNumber] = useState(1)
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingName, setEditingName] = useState('')
+  const [editingScore, setEditingScore] = useState(5)
   const [editingNote, setEditingNote] = useState('')
+  const [isEditDeleteVisible, setIsEditDeleteVisible] = useState(true)
   const [freeMemo, setFreeMemo] = useState('')
   const [openResultPickerKey, setOpenResultPickerKey] = useState<string | null>(null)
 
   const voteLinkBoardRef = useRef<HTMLDivElement | null>(null)
   const fromDotRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const toDotRefs = useRef<Record<string, HTMLButtonElement | null>>({})
+  const importJsonInputRef = useRef<HTMLInputElement | null>(null)
 
   const deadPlayerIds = useMemo(() => {
     const dead = new Set<string>()
@@ -300,7 +519,7 @@ function App() {
   const addParticipant = (): void => {
     setParticipants((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), name: `参加者${prev.length + 1}`, note: '' },
+      { id: crypto.randomUUID(), name: `参加者${prev.length + 1}`, score: 5, note: '' },
     ])
   }
 
@@ -313,19 +532,137 @@ function App() {
 
     setParticipants((prev) => [
       ...prev,
-      ...names.map((name) => ({ id: crypto.randomUUID(), name, note: '' })),
+      ...names.map((name) => ({ id: crypto.randomUUID(), name, score: 5, note: '' })),
     ])
     setImportText('')
     setIsImportOpen(false)
   }
 
-  const closeEditPopup = (): void => {
-    setEditingId(null)
-    setEditingName('')
-    setEditingNote('')
+  const buildExportFileName = (): string => {
+    const matchNumber = Math.max(1, Math.floor(Number(exportMatchNumber) || 1))
+    const date = exportDate || getTodayLocalDateString()
+    return `${date}_${matchNumber}戦目_${exportResult}${selfRole}.json`
   }
 
-  const openEditPopup = (id: string): void => {
+  const openExportPopup = (): void => {
+    setExportDate(getTodayLocalDateString())
+    setIsExportOpen(true)
+  }
+
+  const downloadJson = (): void => {
+    const payload: SavedBoardData = {
+      version: 2,
+      participants,
+      days,
+      roleTracks,
+      votesByDay,
+      runoffByDay,
+      activeVoteDayIndex,
+      freeMemo,
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = buildExportFileName()
+    document.body.append(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+    setIsExportOpen(false)
+  }
+
+  const applyImportedJson = (raw: unknown): void => {
+    const root = toObject(raw)
+    if (!root) {
+      throw new Error('invalid-json-root')
+    }
+
+    const nextParticipants = normalizeImportedParticipants(root.participants)
+    const validIds = new Set(nextParticipants.map((player) => player.id))
+    const nextDays = pruneDaysByValidIds(normalizeImportedDays(root.days), validIds)
+    const nextRoleTracks = applyMediumTargets(
+      pruneTracksByValidIds(
+        normalizeImportedTracks(root.roleTracks, nextDays.length),
+        validIds,
+        nextDays.length,
+      ),
+      nextDays,
+    )
+    const nextVotesByDay = normalizeImportedVotesByDay(root.votesByDay, nextDays.length)
+      .map((votes) => pruneVotesByValidIds(votes, validIds))
+    const nextRunoffByDay = normalizeImportedRunoffByDay(root.runoffByDay, nextDays.length)
+      .map((runoff) => pruneRunoffByValidIds(runoff, validIds))
+    const parsedDayIndex = Number(root.activeVoteDayIndex)
+    const nextActiveVoteDayIndex = Number.isFinite(parsedDayIndex)
+      ? Math.min(Math.max(0, Math.floor(parsedDayIndex)), Math.max(0, nextDays.length - 1))
+      : 0
+    const nextFreeMemo = typeof root.freeMemo === 'string' ? root.freeMemo : ''
+
+    setParticipants(nextParticipants)
+    setDays(nextDays)
+    setRoleTracks(nextRoleTracks)
+    setVotesByDay(nextVotesByDay)
+    setRunoffByDay(nextRunoffByDay)
+    setActiveVoteDayIndex(nextActiveVoteDayIndex)
+    setFreeMemo(nextFreeMemo)
+    setOpenResultPickerKey(null)
+    setIsImportOpen(false)
+    closeEditPopupWithoutSaving()
+    setIsRunoffPopupOpen(false)
+    setActiveRunoffRoundIndex(0)
+    setDraggingFromId(null)
+    setDragPointer(null)
+    setHoverVoteTargetId(null)
+  }
+
+  const uploadJson = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      return
+    }
+
+    try {
+      const text = await file.text()
+      const parsed = JSON.parse(text) as unknown
+      applyImportedJson(parsed)
+    } catch {
+      window.alert('JSONの読み込みに失敗しました。ファイル形式を確認してください。')
+    }
+  }
+
+  const closeEditPopup = (): void => {
+    if (editingId) {
+      setParticipants((prev) =>
+        prev.map((player) =>
+          player.id === editingId
+            ? {
+                ...player,
+                name: editingName.trim() || '名前未設定',
+                score: clampParticipantScore(editingScore),
+                note: editingNote,
+              }
+            : player,
+        ),
+      )
+    }
+    setEditingId(null)
+    setEditingName('')
+    setEditingScore(5)
+    setEditingNote('')
+    setIsEditDeleteVisible(true)
+  }
+
+  const closeEditPopupWithoutSaving = (): void => {
+    setEditingId(null)
+    setEditingName('')
+    setEditingScore(5)
+    setEditingNote('')
+    setIsEditDeleteVisible(true)
+  }
+
+  const openEditPopup = (id: string, showDeleteButton = true): void => {
     const target = participants.find((player) => player.id === id)
     if (!target) {
       return
@@ -333,22 +670,9 @@ function App() {
 
     setEditingId(id)
     setEditingName(target.name)
+    setEditingScore(clampParticipantScore(target.score))
     setEditingNote(target.note)
-  }
-
-  const saveEditedName = (): void => {
-    if (!editingId) {
-      return
-    }
-
-    setParticipants((prev) =>
-      prev.map((player) =>
-        player.id === editingId
-          ? { ...player, name: editingName.trim() || '名前未設定', note: editingNote }
-          : player,
-      ),
-    )
-    closeEditPopup()
+    setIsEditDeleteVisible(showDeleteButton)
   }
 
   const deleteParticipant = (): void => {
@@ -371,7 +695,7 @@ function App() {
     setVotesByDay((prev) =>
       normalizeVotesByDay(prev, nextDays.length).map((votes) => pruneVotesByValidIds(votes, validIds)),
     )
-    closeEditPopup()
+    closeEditPopupWithoutSaving()
   }
 
   const updateDaySelect = (
@@ -458,17 +782,20 @@ function App() {
       ...prev,
       [role]: prev[role].map((track, currentTrackIndex) =>
         currentTrackIndex === trackIndex
-          ? {
-              ...track,
-              results: track.results.map((result, currentDayIndex) =>
-                currentDayIndex === dayIndex
-                  ? {
-                      ...result,
-                      result: value,
-                    }
-                  : result,
-              ),
-            }
+          ? (role === 'seer' || role === 'medium') &&
+            isPlayerDeadBeforeDay(days, track.playerId, dayIndex)
+            ? track
+            : {
+                ...track,
+                results: track.results.map((result, currentDayIndex) =>
+                  currentDayIndex === dayIndex
+                    ? {
+                        ...result,
+                        result: value,
+                      }
+                    : result,
+                ),
+              }
           : track,
       ),
     }))
@@ -488,17 +815,19 @@ function App() {
       ...prev,
       [role]: prev[role].map((track, currentTrackIndex) =>
         currentTrackIndex === trackIndex
-          ? {
-              ...track,
-              results: track.results.map((result, currentDayIndex) =>
-                currentDayIndex === dayIndex
-                  ? {
-                      ...result,
-                      targetId,
-                    }
-                  : result,
-              ),
-            }
+          ? role === 'seer' && isPlayerDeadBeforeDay(days, track.playerId, dayIndex)
+            ? track
+            : {
+                ...track,
+                results: track.results.map((result, currentDayIndex) =>
+                  currentDayIndex === dayIndex
+                    ? {
+                        ...result,
+                        targetId,
+                      }
+                    : result,
+                ),
+              }
           : track,
       ),
     }))
@@ -533,6 +862,31 @@ function App() {
     )
   }
 
+  const getVoteCounts = (votes: DayVotes): Record<string, number> => {
+    const counts: Record<string, number> = {}
+    Object.values(votes).forEach((toId) => {
+      counts[toId] = (counts[toId] ?? 0) + 1
+    })
+    return counts
+  }
+
+  const getTopCandidateIds = (candidateIds: string[], votes: DayVotes): string[] => {
+    if (candidateIds.length === 0) {
+      return []
+    }
+    const counts = getVoteCounts(votes)
+    const maxCount = Math.max(0, ...candidateIds.map((id) => counts[id] ?? 0))
+    if (maxCount === 0) {
+      return []
+    }
+    return candidateIds.filter((id) => (counts[id] ?? 0) === maxCount)
+  }
+
+  const getRunoffVoterIds = (aliveIds: Set<string>, candidateIds: string[]): string[] => {
+    const candidateSet = new Set(candidateIds)
+    return [...aliveIds].filter((id) => !candidateSet.has(id))
+  }
+
   const aliveIdsOnActiveVoteDay = useMemo(
     () => getAlivePlayerIdsAtDay(activeVoteDayIndex),
     [activeVoteDayIndex, days, participants],
@@ -560,13 +914,7 @@ function App() {
     })
   }, [currentDayVotes])
 
-  const firstVoteCounts = useMemo(() => {
-    const counts: Record<string, number> = {}
-    Object.values(currentDayVotes).forEach((toId) => {
-      counts[toId] = (counts[toId] ?? 0) + 1
-    })
-    return counts
-  }, [currentDayVotes])
+  const firstVoteCounts = useMemo(() => getVoteCounts(currentDayVotes), [currentDayVotes])
 
   const hasAllAliveVoted = useMemo(
     () =>
@@ -588,42 +936,76 @@ function App() {
       .map((player) => player.id)
   }, [hasAllAliveVoted, firstVoteCounts, alivePlayersOnActiveVoteDay])
 
-  const needsRunoff = tiedTopCandidateIds.length >= 2
+  const needsFirstRunoff = tiedTopCandidateIds.length >= 2
   const tiedTopCandidateKey = tiedTopCandidateIds.join('|')
 
-  const runoffVoterIdsForActiveDay = useMemo(() => {
-    const tiedSet = new Set(tiedTopCandidateIds)
-    return alivePlayersOnActiveVoteDay
-      .map((player) => player.id)
-      .filter((playerId) => !tiedSet.has(playerId))
-  }, [alivePlayersOnActiveVoteDay, tiedTopCandidateIds])
+  const firstRunoffVoterIdsForActiveDay = useMemo(
+    () => getRunoffVoterIds(aliveIdsOnActiveVoteDay, tiedTopCandidateIds),
+    [aliveIdsOnActiveVoteDay, tiedTopCandidateIds],
+  )
 
-  const runoffVoterKey = runoffVoterIdsForActiveDay.join('|')
+  const firstRunoffVoterKey = firstRunoffVoterIdsForActiveDay.join('|')
 
   const activeRunoffDay = runoffByDay[activeVoteDayIndex] ?? null
-  const activeRunoffVotes = activeRunoffDay?.votes ?? {}
+  const firstRunoffRound = activeRunoffDay?.rounds[0] ?? null
+  const secondRunoffRound = activeRunoffDay?.rounds[1] ?? null
+  const firstRunoffCandidateIds = firstRunoffRound?.candidateIds ?? tiedTopCandidateIds
+  const firstRunoffVotes = firstRunoffRound?.votes ?? {}
 
-  const runoffCandidatesOnActiveDay = useMemo(() => {
-    const candidateSet = new Set(tiedTopCandidateIds)
+  const firstRunoffCandidatesOnActiveDay = useMemo(() => {
+    const candidateSet = new Set(firstRunoffCandidateIds)
     return participants.filter((player) => candidateSet.has(player.id))
-  }, [participants, tiedTopCandidateIds])
+  }, [participants, firstRunoffCandidateIds])
 
-  const runoffVotersOnActiveDay = useMemo(() => {
-    const voterSet = new Set(runoffVoterIdsForActiveDay)
+  const firstRunoffVotersOnActiveDay = useMemo(() => {
+    const voterSet = new Set(firstRunoffVoterIdsForActiveDay)
     return participants.filter((player) => voterSet.has(player.id))
-  }, [participants, runoffVoterIdsForActiveDay])
+  }, [participants, firstRunoffVoterIdsForActiveDay])
 
-  const isRunoffComplete = useMemo(
-    () => runoffVoterIdsForActiveDay.every((fromId) => activeRunoffVotes[fromId] !== undefined),
-    [runoffVoterIdsForActiveDay, activeRunoffVotes],
+  const isFirstRunoffComplete = useMemo(
+    () => firstRunoffVoterIdsForActiveDay.every((fromId) => firstRunoffVotes[fromId] !== undefined),
+    [firstRunoffVoterIdsForActiveDay, firstRunoffVotes],
   )
+
+  const tiedTopCandidateIdsAfterFirstRunoff = useMemo(() => {
+    if (!isFirstRunoffComplete) {
+      return [] as string[]
+    }
+    return getTopCandidateIds(firstRunoffCandidateIds, firstRunoffVotes)
+  }, [isFirstRunoffComplete, firstRunoffCandidateIds, firstRunoffVotes])
+
+  const needsSecondRunoff = tiedTopCandidateIdsAfterFirstRunoff.length >= 2
+
+  const secondRunoffVoterIdsForActiveDay = useMemo(
+    () => getRunoffVoterIds(aliveIdsOnActiveVoteDay, tiedTopCandidateIdsAfterFirstRunoff),
+    [aliveIdsOnActiveVoteDay, tiedTopCandidateIdsAfterFirstRunoff],
+  )
+
+  const secondRunoffVotes = secondRunoffRound?.votes ?? {}
+
+  const secondRunoffCandidatesOnActiveDay = useMemo(() => {
+    const candidateSet = new Set(tiedTopCandidateIdsAfterFirstRunoff)
+    return participants.filter((player) => candidateSet.has(player.id))
+  }, [participants, tiedTopCandidateIdsAfterFirstRunoff])
+
+  const secondRunoffVotersOnActiveDay = useMemo(() => {
+    const voterSet = new Set(secondRunoffVoterIdsForActiveDay)
+    return participants.filter((player) => voterSet.has(player.id))
+  }, [participants, secondRunoffVoterIdsForActiveDay])
+
+  const isSecondRunoffComplete = useMemo(
+    () => secondRunoffVoterIdsForActiveDay.every((fromId) => secondRunoffVotes[fromId] !== undefined),
+    [secondRunoffVoterIdsForActiveDay, secondRunoffVotes],
+  )
+
+  const isRunoffFullyComplete = isFirstRunoffComplete && (!needsSecondRunoff || isSecondRunoffComplete)
 
   useEffect(() => {
     setRunoffByDay((prev) => {
       const normalized = normalizeRunoffByDay(prev, days.length)
       const currentRunoff = normalized[activeVoteDayIndex] ?? null
 
-      if (!needsRunoff) {
+      if (!needsFirstRunoff) {
         if (currentRunoff === null) {
           return prev
         }
@@ -631,66 +1013,111 @@ function App() {
         return normalized
       }
 
-      if (currentRunoff && areStringArraysEqual(currentRunoff.candidateIds, tiedTopCandidateIds)) {
-        const allowedFromIds = new Set(runoffVoterIdsForActiveDay)
-        const allowedToIds = new Set(tiedTopCandidateIds)
-        const nextVotes = Object.fromEntries(
-          Object.entries(currentRunoff.votes).filter(
-            ([fromId, toId]) => allowedFromIds.has(fromId) && allowedToIds.has(toId),
-          ),
-        )
-        if (areVoteMapsEqual(currentRunoff.votes, nextVotes)) {
-          return prev
+      const firstRound = currentRunoff?.rounds[0]
+      const firstRoundCandidateIds = [...tiedTopCandidateIds]
+      const firstAllowedFromIds = new Set(firstRunoffVoterIdsForActiveDay)
+      const firstAllowedToIds = new Set(firstRoundCandidateIds)
+      const firstRoundVotes =
+        firstRound && areStringArraysEqual(firstRound.candidateIds, firstRoundCandidateIds)
+          ? Object.fromEntries(
+              Object.entries(firstRound.votes).filter(
+                ([fromId, toId]) => firstAllowedFromIds.has(fromId) && firstAllowedToIds.has(toId),
+              ),
+            )
+          : {}
+
+      const nextRounds: RunoffRound[] = [
+        {
+          candidateIds: firstRoundCandidateIds,
+          votes: firstRoundVotes,
+        },
+      ]
+
+      const firstRoundComplete = firstRunoffVoterIdsForActiveDay.every((fromId) => firstRoundVotes[fromId] !== undefined)
+      if (firstRoundComplete) {
+        const secondRoundCandidateIds = getTopCandidateIds(firstRoundCandidateIds, firstRoundVotes)
+        if (secondRoundCandidateIds.length >= 2) {
+          const secondRound = currentRunoff?.rounds[1]
+          const secondAllowedFromIds = new Set(getRunoffVoterIds(aliveIdsOnActiveVoteDay, secondRoundCandidateIds))
+          const secondAllowedToIds = new Set(secondRoundCandidateIds)
+          const secondRoundVotes =
+            secondRound && areStringArraysEqual(secondRound.candidateIds, secondRoundCandidateIds)
+              ? Object.fromEntries(
+                  Object.entries(secondRound.votes).filter(
+                    ([fromId, toId]) => secondAllowedFromIds.has(fromId) && secondAllowedToIds.has(toId),
+                  ),
+                )
+              : {}
+          nextRounds.push({
+            candidateIds: secondRoundCandidateIds,
+            votes: secondRoundVotes,
+          })
         }
-        normalized[activeVoteDayIndex] = {
-          candidateIds: [...tiedTopCandidateIds],
-          votes: nextVotes,
-        }
-        return normalized
+      }
+
+      if (currentRunoff && areRunoffRoundsEqual(currentRunoff.rounds, nextRounds)) {
+        return prev
       }
 
       normalized[activeVoteDayIndex] = {
-        candidateIds: [...tiedTopCandidateIds],
-        votes: {},
+        rounds: nextRounds,
       }
       return normalized
     })
 
-    if (!needsRunoff) {
+    if (!needsFirstRunoff) {
       setIsRunoffPopupOpen(false)
     }
   }, [
-    needsRunoff,
+    needsFirstRunoff,
     tiedTopCandidateKey,
-    runoffVoterKey,
+    firstRunoffVoterKey,
+    firstRunoffVotes,
     activeVoteDayIndex,
     days.length,
-    tiedTopCandidateIds,
-    runoffVoterIdsForActiveDay,
+    aliveIdsOnActiveVoteDay,
+    firstRunoffVoterIdsForActiveDay,
   ])
 
-  const updateRunoffVote = (fromId: string, toId: string, checked: boolean): void => {
+  useEffect(() => {
+    if (!needsSecondRunoff && activeRunoffRoundIndex > 0) {
+      setActiveRunoffRoundIndex(0)
+    }
+  }, [needsSecondRunoff, activeRunoffRoundIndex])
+
+  const updateRunoffVote = (roundIndex: 0 | 1, fromId: string, toId: string, checked: boolean): void => {
     setRunoffByDay((prev) => {
       const normalized = normalizeRunoffByDay(prev, days.length)
       const runoff = normalized[activeVoteDayIndex]
       if (!runoff) {
         return prev
       }
+      const round = runoff.rounds[roundIndex]
+      if (!round) {
+        return prev
+      }
 
-      const nextVotes = { ...runoff.votes }
-      if (!checked && runoff.votes[fromId] === toId) {
+      const nextVotes = { ...round.votes }
+      if (!checked && round.votes[fromId] === toId) {
         delete nextVotes[fromId]
       } else if (checked) {
         nextVotes[fromId] = toId
       }
 
-      if (areVoteMapsEqual(runoff.votes, nextVotes)) {
+      if (areVoteMapsEqual(round.votes, nextVotes)) {
         return prev
       }
 
+      const nextRounds = runoff.rounds.map((currentRound, index) =>
+        index === roundIndex
+          ? {
+              candidateIds: currentRound.candidateIds,
+              votes: nextVotes,
+            }
+          : currentRound,
+      )
       normalized[activeVoteDayIndex] = {
-        candidateIds: runoff.candidateIds,
-        votes: nextVotes,
+        rounds: nextRounds,
       }
       return normalized
     })
@@ -817,6 +1244,29 @@ function App() {
 
   return (
     <main className="app">
+      <div className="top-right-actions">
+        <button
+          type="button"
+          className="mini-action-btn"
+          onClick={() => importJsonInputRef.current?.click()}
+        >
+          JSON読込
+        </button>
+        <button
+          type="button"
+          className="mini-action-btn"
+          onClick={openExportPopup}
+        >
+          JSON保存
+        </button>
+        <input
+          ref={importJsonInputRef}
+          type="file"
+          accept="application/json,.json"
+          onChange={uploadJson}
+          className="hidden-file-input"
+        />
+      </div>
       <aside className="sidebar">
         <h2>参加者</h2>
         <ul className="participant-list">
@@ -847,6 +1297,20 @@ function App() {
       <section className="board">
         <div className="board-header">
           <h1>盤面整理表</h1>
+          <div className="self-role-selector">
+            <label htmlFor="self-role-select">自分の役職</label>
+            <select
+              id="self-role-select"
+              value={selfRole}
+              onChange={(event) => setSelfRole(event.target.value as SelfRole)}
+            >
+              {SELF_ROLE_OPTIONS.map((role) => (
+                <option key={`self-role-${role}`} value={role}>
+                  {role}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <div className="table-wrap">
@@ -959,6 +1423,11 @@ function App() {
                     </td>
                     {days.map((_, dayIndex) => (
                       <td key={`${role}-${track.id}-${dayIndex}`}>
+                        {(() => {
+                          const isRoleResultInputDisabled =
+                            (role === 'seer' || role === 'medium') &&
+                            isPlayerDeadBeforeDay(days, track.playerId, dayIndex)
+                          return (
                         <div className="role-cell">
                           <select
                             value={
@@ -968,7 +1437,7 @@ function App() {
                                   : (days[dayIndex - 1]?.executedId ?? '')
                                 : (track.results[dayIndex]?.targetId ?? '')
                             }
-                            disabled={role === 'medium'}
+                            disabled={role === 'medium' || isRoleResultInputDisabled}
                             onChange={(event) =>
                               updateRoleTarget(
                                 role,
@@ -990,7 +1459,11 @@ function App() {
                               <button
                                 type="button"
                                 className="result-box"
+                                disabled={isRoleResultInputDisabled}
                                 onClick={() => {
+                                  if (isRoleResultInputDisabled) {
+                                    return
+                                  }
                                   const key = `${role}-${track.id}-${dayIndex}`
                                   setOpenResultPickerKey((prev) =>
                                     prev === key ? null : key,
@@ -999,7 +1472,8 @@ function App() {
                               >
                                 {getResultMark(track.results[dayIndex]?.result ?? '結果なし')}
                               </button>
-                              {openResultPickerKey === `${role}-${track.id}-${dayIndex}` && (
+                              {!isRoleResultInputDisabled &&
+                                openResultPickerKey === `${role}-${track.id}-${dayIndex}` && (
                                 <div className="result-menu">
                                   <button
                                     type="button"
@@ -1036,6 +1510,8 @@ function App() {
                             </div>
                           )}
                         </div>
+                          )
+                        })()}
                       </td>
                     ))}
                   </tr>
@@ -1057,6 +1533,7 @@ function App() {
                 className={`vote-tab ${activeVoteDayIndex === index ? 'is-active' : ''}`}
                 onClick={() => {
                   setActiveVoteDayIndex(index)
+                  setActiveRunoffRoundIndex(0)
                   setDraggingFromId(null)
                   setHoverVoteTargetId(null)
                 }}
@@ -1096,7 +1573,13 @@ function App() {
                 <h3>投票者</h3>
                 {alivePlayersOnActiveVoteDay.map((player) => (
                   <div key={`from-${player.id}`} className="vote-link-row is-from">
-                    <span>{player.name}</span>
+                    <button
+                      type="button"
+                      className="vote-link-name-button"
+                      onClick={() => openEditPopup(player.id, false)}
+                    >
+                      {player.name}
+                    </button>
                     <button
                       type="button"
                       className={`vote-link-dot ${draggingFromId === player.id ? 'is-active' : ''}`}
@@ -1163,40 +1646,54 @@ function App() {
                     </td>
                   </tr>
                 ) : (
-                  voteRows.map((row) => (
-                    <tr key={`${activeVoteDayIndex}-${row.fromId}`}>
-                      <td>{participants.find((player) => player.id === row.fromId)?.name ?? '(不明)'}</td>
-                      <td>
-                        {participants.find((player) => player.id === row.toId)?.name ?? '(不明)'} ({row.countAtThatPoint})
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          className="vote-cancel-btn"
-                          onClick={() => cancelVote(row.fromId)}
-                          aria-label="投票をキャンセル"
-                        >
-                          ×
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                  voteRows.map((row) => {
+                    const fromName = participants.find((player) => player.id === row.fromId)?.name ?? '(不明)'
+                    const toName = participants.find((player) => player.id === row.toId)?.name ?? '(不明)'
+                    return (
+                      <tr key={`${activeVoteDayIndex}-${row.fromId}`}>
+                        <td>{fromName}</td>
+                        <td>
+                          {toName} ({row.countAtThatPoint})
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            className="vote-cancel-btn"
+                            onClick={() => cancelVote(row.fromId)}
+                            aria-label="投票をキャンセル"
+                          >
+                            ×
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })
                 )}
               </tbody>
             </table>
           </div>
         </div>
-        {needsRunoff && (
+        {needsFirstRunoff && (
           <div className="runoff-launch">
             <button
               type="button"
               className="btn btn--primary"
-              onClick={() => setIsRunoffPopupOpen(true)}
+              onClick={() => {
+                setActiveRunoffRoundIndex(needsSecondRunoff ? 1 : 0)
+                setIsRunoffPopupOpen(true)
+              }}
             >
-              決戦投票
+              {needsSecondRunoff ? '再決戦投票' : '決戦投票'}
             </button>
             <span className="runoff-launch-note">
-              同票のため決戦投票が必要です{isRunoffComplete ? '（入力完了）' : ''}
+              同票のため決戦投票が必要です
+              {needsSecondRunoff
+                ? isRunoffFullyComplete
+                  ? '（1回目・2回目とも入力完了）'
+                  : '（2回目の入力が必要）'
+                : isRunoffFullyComplete
+                  ? '（入力完了）'
+                  : ''}
             </span>
           </div>
         )}
@@ -1212,42 +1709,93 @@ function App() {
       </section>
       </div>
 
-      {isRunoffPopupOpen && needsRunoff && activeRunoffDay && (
+      {isRunoffPopupOpen && needsFirstRunoff && activeRunoffDay && (
         <div className="modal-backdrop" onClick={() => setIsRunoffPopupOpen(false)}>
           <div className="modal runoff-modal" onClick={(event) => event.stopPropagation()}>
             <h3>決戦投票</h3>
             <p>
               同票のため決戦投票を入力してください。
-              {isRunoffComplete ? '（入力完了）' : ''}
+              {needsSecondRunoff
+                ? isRunoffFullyComplete
+                  ? '（1回目・2回目とも入力完了）'
+                  : '（2回目の入力が必要）'
+                : isRunoffFullyComplete
+                  ? '（入力完了）'
+                  : ''}
             </p>
+            {needsSecondRunoff && (
+              <div className="runoff-round-tabs" role="tablist" aria-label="決戦投票ラウンド">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeRunoffRoundIndex === 0}
+                  className={`runoff-round-tab ${activeRunoffRoundIndex === 0 ? 'is-active' : ''}`}
+                  onClick={() => setActiveRunoffRoundIndex(0)}
+                >
+                  1回目
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeRunoffRoundIndex === 1}
+                  className={`runoff-round-tab ${activeRunoffRoundIndex === 1 ? 'is-active' : ''}`}
+                  onClick={() => setActiveRunoffRoundIndex(1)}
+                >
+                  2回目
+                </button>
+              </div>
+            )}
             <div className="runoff-table-wrap">
               <table className="runoff-table">
                 <thead>
                   <tr>
                     <th>投票者</th>
-                    {runoffCandidatesOnActiveDay.map((candidate) => (
+                    {(activeRunoffRoundIndex === 1
+                      ? secondRunoffCandidatesOnActiveDay
+                      : firstRunoffCandidatesOnActiveDay).map((candidate) => (
                       <th key={`runoff-col-${candidate.id}`}>{candidate.name}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {runoffVotersOnActiveDay.length === 0 ? (
+                  {(activeRunoffRoundIndex === 1
+                    ? secondRunoffVotersOnActiveDay
+                    : firstRunoffVotersOnActiveDay).length === 0 ? (
                     <tr>
-                      <td colSpan={runoffCandidatesOnActiveDay.length + 1} className="placeholder-cell">
+                      <td
+                        colSpan={
+                          (activeRunoffRoundIndex === 1
+                            ? secondRunoffCandidatesOnActiveDay
+                            : firstRunoffCandidatesOnActiveDay).length + 1
+                        }
+                        className="placeholder-cell"
+                      >
                         決戦投票の対象外プレイヤーがいません。
                       </td>
                     </tr>
                   ) : (
-                    runoffVotersOnActiveDay.map((voter) => (
+                    (activeRunoffRoundIndex === 1
+                      ? secondRunoffVotersOnActiveDay
+                      : firstRunoffVotersOnActiveDay).map((voter) => (
                       <tr key={`runoff-row-${voter.id}`}>
                         <td>{voter.name}</td>
-                        {runoffCandidatesOnActiveDay.map((candidate) => (
+                        {(activeRunoffRoundIndex === 1
+                          ? secondRunoffCandidatesOnActiveDay
+                          : firstRunoffCandidatesOnActiveDay).map((candidate) => (
                           <td key={`runoff-cell-${voter.id}-${candidate.id}`} className="runoff-check-cell">
                             <input
                               type="checkbox"
-                              checked={activeRunoffVotes[voter.id] === candidate.id}
+                              checked={
+                                (activeRunoffRoundIndex === 1 ? secondRunoffVotes : firstRunoffVotes)[voter.id] ===
+                                candidate.id
+                              }
                               onChange={(event) =>
-                                updateRunoffVote(voter.id, candidate.id, event.target.checked)
+                                updateRunoffVote(
+                                  activeRunoffRoundIndex === 1 ? 1 : 0,
+                                  voter.id,
+                                  candidate.id,
+                                  event.target.checked,
+                                )
                               }
                             />
                           </td>
@@ -1271,7 +1819,7 @@ function App() {
         <div className="modal-backdrop" onClick={() => setIsImportOpen(false)}>
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <h3>テキストから取り込む</h3>
-            <p>改行・カンマ・空白区切りで名前を入力してください。</p>
+            <p>改行区切りで名前を入力してください。</p>
             <textarea
               rows={8}
               value={importText}
@@ -1293,6 +1841,54 @@ function App() {
         </div>
       )}
 
+      {isExportOpen && (
+        <div className="modal-backdrop" onClick={() => setIsExportOpen(false)}>
+          <div className="modal export-modal" onClick={(event) => event.stopPropagation()}>
+            <h3>JSON保存</h3>
+            <div className="export-form-row">
+              <label htmlFor="export-result">勝敗</label>
+              <select
+                id="export-result"
+                value={exportResult}
+                onChange={(event) => setExportResult(event.target.value as '○' | '●')}
+              >
+                <option value="○">○（勝ち）</option>
+                <option value="●">●（負け）</option>
+              </select>
+            </div>
+            <div className="export-form-row">
+              <label htmlFor="export-date">日付</label>
+              <input
+                id="export-date"
+                type="date"
+                value={exportDate}
+                onChange={(event) => setExportDate(event.target.value)}
+              />
+            </div>
+            <div className="export-form-row">
+              <label htmlFor="export-match-number">何戦目</label>
+              <input
+                id="export-match-number"
+                type="number"
+                min={1}
+                step={1}
+                value={exportMatchNumber}
+                onChange={(event) => setExportMatchNumber(Math.max(1, Math.floor(Number(event.target.value) || 1)))}
+              />
+            </div>
+            <p className="export-file-preview">{buildExportFileName()}</p>
+            <div className="modal-actions">
+              <button type="button" className="btn" onClick={() => setIsExportOpen(false)}>
+                キャンセル
+              </button>
+              <button type="button" className="btn btn--primary" onClick={downloadJson}>
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {editingId && (
         <div className="modal-backdrop" onClick={closeEditPopup}>
           <div className="modal" onClick={(event) => event.stopPropagation()}>
@@ -1302,6 +1898,31 @@ function App() {
               value={editingName}
               onChange={(event) => setEditingName(event.target.value)}
             />
+            <div className="edit-score-row">
+              <button
+                type="button"
+                className="score-step-btn"
+                onClick={() => setEditingScore((prev) => clampParticipantScore(prev - 1))}
+                aria-label="数値を1下げる"
+              >
+                -
+              </button>
+              <input
+                type="number"
+                min={0}
+                max={10}
+                value={editingScore}
+                onChange={(event) => setEditingScore(clampParticipantScore(Number(event.target.value)))}
+              />
+              <button
+                type="button"
+                className="score-step-btn"
+                onClick={() => setEditingScore((prev) => clampParticipantScore(prev + 1))}
+                aria-label="数値を1上げる"
+              >
+                +
+              </button>
+            </div>
             <textarea
               rows={4}
               value={editingNote}
@@ -1312,12 +1933,11 @@ function App() {
               <button type="button" className="btn" onClick={closeEditPopup}>
                 閉じる
               </button>
-              <button type="button" className="btn btn--danger" onClick={deleteParticipant}>
-                削除
-              </button>
-              <button type="button" className="btn btn--primary" onClick={saveEditedName}>
-                保存
-              </button>
+              {isEditDeleteVisible && (
+                <button type="button" className="btn btn--danger" onClick={deleteParticipant}>
+                  削除
+                </button>
+              )}
             </div>
           </div>
         </div>
