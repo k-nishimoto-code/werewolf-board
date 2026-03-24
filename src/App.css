@@ -47,6 +47,7 @@
 .sidebar,
 .board,
 .vote-record,
+.stream-comment,
 .free-memo {
   background: #ffffff;
   border: 1px solid #cbd5e1;
@@ -57,8 +58,14 @@
 .sidebar h2,
 .board h1,
 .vote-record h2,
+.stream-comment h2,
 .free-memo h2 {
   margin: 0 0 0.75rem;
+}
+
+.stream-comment textarea {
+  min-height: 5.5rem;
+  resize: vertical;
 }
 
 .free-memo {

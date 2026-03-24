@@ -1,6 +1,15 @@
 ﻿import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import './App.css'
 
+import {
+  STREAM_OVERLAY_STORAGE_KEY,
+  STREAM_WINDOW_QUERY_KEY,
+  STREAM_WINDOW_QUERY_VALUE,
+  type StreamDaySummary,
+  type StreamOverlayPayload,
+  type StreamRoleResultItem,
+} from './streaming'
+
 type RoleKey = 'seer' | 'medium' | 'guard'
 
 type Participant = {
@@ -44,6 +53,7 @@ type SavedBoardData = {
   runoffByDay: (RunoffDay | null)[]
   activeVoteDayIndex: number
   freeMemo: string
+  streamComment?: string
 }
 
 const ROLE_KEYS: RoleKey[] = ['seer', 'medium', 'guard']
@@ -470,6 +480,7 @@ function App() {
   const [editingScore, setEditingScore] = useState(5)
   const [editingNote, setEditingNote] = useState('')
   const [isEditDeleteVisible, setIsEditDeleteVisible] = useState(true)
+  const [streamComment, setStreamComment] = useState('')
   const [freeMemo, setFreeMemo] = useState('')
   const [openResultPickerKey, setOpenResultPickerKey] = useState<string | null>(null)
 
@@ -477,6 +488,7 @@ function App() {
   const fromDotRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const toDotRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const importJsonInputRef = useRef<HTMLInputElement | null>(null)
+  const streamWindowRef = useRef<Window | null>(null)
 
   const deadPlayerIds = useMemo(() => {
     const dead = new Set<string>()
@@ -492,6 +504,88 @@ function App() {
 
     return dead
   }, [days])
+
+  const participantNameMap = useMemo(
+    () => new Map(participants.map((player) => [player.id, player.name])),
+    [participants],
+  )
+
+  const streamDaySummaries = useMemo<StreamDaySummary[]>(() => {
+    const roleResultsByDay = new Map<number, StreamRoleResultItem[]>()
+
+    ROLE_KEYS.forEach((role) => {
+      roleTracks[role].forEach((track) => {
+        const actorName = participantNameMap.get(track.playerId) ?? ''
+        if (!actorName) {
+          return
+        }
+
+        track.results.forEach((result, dayIndex) => {
+          if (role === 'medium' && isPlayerDeadBeforeDay(days, track.playerId, dayIndex)) {
+            return
+          }
+
+          const targetName = participantNameMap.get(result.targetId) ?? ''
+          const resultMark =
+            result.result === '白' ? '○' : result.result === '黒' ? '●' : ''
+          const resultText =
+            result.result === '結果なし'
+              ? ''
+              : `${result.result}${targetName ? ` (${targetName})` : ''}`
+
+          if (!targetName && !resultMark && !resultText) {
+            return
+          }
+
+          const items = roleResultsByDay.get(dayIndex) ?? []
+          items.push({
+            id: `${role}-${track.id}-${dayIndex}`,
+            roleLabel: ROLE_LABELS[role],
+            actorName,
+            targetName,
+            resultMark,
+            resultText,
+          })
+          roleResultsByDay.set(dayIndex, items)
+        })
+      })
+    })
+
+    return days
+      .map((day, dayIndex) => ({
+        dayNumber: dayIndex + 1,
+        executedName: participantNameMap.get(day.executedId) ?? '',
+        bittenName: participantNameMap.get(day.bittenId) ?? '',
+        roleResults: roleResultsByDay.get(dayIndex) ?? [],
+      }))
+      .filter((summary) =>
+        summary.executedName !== '' ||
+        summary.bittenName !== '' ||
+        summary.roleResults.length > 0,
+      )
+  }, [days, participantNameMap, roleTracks])
+
+  const streamOverlayPayload = useMemo<StreamOverlayPayload>(
+    () => ({
+      updatedAt: new Date().toISOString(),
+      activeDayNumber: activeVoteDayIndex + 1,
+      latestDayNumber: streamDaySummaries.at(-1)?.dayNumber ?? activeVoteDayIndex + 1,
+      daySummaries: streamDaySummaries,
+      roleActorsByLabel: {
+        占い師: roleTracks.seer
+          .map((track) => participantNameMap.get(track.playerId) ?? '')
+          .filter((name) => name !== ''),
+        霊媒師: roleTracks.medium
+          .map((track) => participantNameMap.get(track.playerId) ?? '')
+          .filter((name) => name !== ''),
+        騎士: roleTracks.guard
+          .map((track) => participantNameMap.get(track.playerId) ?? '')
+          .filter((name) => name !== ''),
+      },
+      comment: streamComment,
+    }),
+    [activeVoteDayIndex, participantNameMap, roleTracks, streamComment, streamDaySummaries],
+  )
 
   useEffect(() => {
     setVotesByDay((prev) => normalizeVotesByDay(prev, days.length))
@@ -515,6 +609,13 @@ function App() {
       window.removeEventListener('scroll', updateLayout, true)
     }
   }, [])
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      STREAM_OVERLAY_STORAGE_KEY,
+      JSON.stringify(streamOverlayPayload),
+    )
+  }, [streamOverlayPayload])
 
   const addParticipant = (): void => {
     setParticipants((prev) => [
@@ -559,6 +660,7 @@ function App() {
       runoffByDay,
       activeVoteDayIndex,
       freeMemo,
+      streamComment,
     }
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -598,6 +700,7 @@ function App() {
       ? Math.min(Math.max(0, Math.floor(parsedDayIndex)), Math.max(0, nextDays.length - 1))
       : 0
     const nextFreeMemo = typeof root.freeMemo === 'string' ? root.freeMemo : ''
+    const nextStreamComment = typeof root.streamComment === 'string' ? root.streamComment : ''
 
     setParticipants(nextParticipants)
     setDays(nextDays)
@@ -606,6 +709,7 @@ function App() {
     setRunoffByDay(nextRunoffByDay)
     setActiveVoteDayIndex(nextActiveVoteDayIndex)
     setFreeMemo(nextFreeMemo)
+    setStreamComment(nextStreamComment)
     setOpenResultPickerKey(null)
     setIsImportOpen(false)
     closeEditPopupWithoutSaving()
@@ -1242,9 +1346,42 @@ function App() {
     }
   }, [draggingFromId, dragPointer, layoutTick])
 
+  const openStreamWindow = (): void => {
+    const url = new URL(window.location.href)
+    url.searchParams.set(STREAM_WINDOW_QUERY_KEY, STREAM_WINDOW_QUERY_VALUE)
+
+    const existingWindow = streamWindowRef.current
+    if (existingWindow && !existingWindow.closed) {
+      existingWindow.location.href = url.toString()
+      existingWindow.focus()
+      return
+    }
+
+    const nextWindow = window.open(
+      url.toString(),
+      'werewolf-board-stream-window',
+      'popup=yes,width=1800,height=360',
+    )
+
+    if (!nextWindow) {
+      window.alert('配信用ウィンドウを開けませんでした。ポップアップ設定を確認してください。')
+      return
+    }
+
+    streamWindowRef.current = nextWindow
+    nextWindow.focus()
+  }
+
   return (
     <main className="app">
       <div className="top-right-actions">
+        <button
+          type="button"
+          className="mini-action-btn"
+          onClick={openStreamWindow}
+        >
+          配信用ウィンドウ
+        </button>
         <button
           type="button"
           className="mini-action-btn"
@@ -1697,6 +1834,15 @@ function App() {
             </span>
           </div>
         )}
+      </section>
+      <section className="stream-comment">
+        <h2>配信用コメント</h2>
+        <textarea
+          value={streamComment}
+          onChange={(event) => setStreamComment(event.target.value)}
+          placeholder="配信用ウィンドウに表示するコメントを入力できます。"
+          rows={2}
+        />
       </section>
       <section className="free-memo">
         <h2>フリーメモ</h2>
