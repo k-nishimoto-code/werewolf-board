@@ -1,5 +1,6 @@
 ﻿import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import './App.css'
+import jinroIcon from './assets/JINRO_ICON.png'
 
 import {
   STREAM_OVERLAY_STORAGE_KEY,
@@ -67,7 +68,7 @@ const ROLE_LABELS: Record<RoleKey, string> = {
 }
 
 const COLOR_MODE_STORAGE_KEY = 'werewolf-board-color-mode'
-const APP_TITLE = 'Werewolf Board'
+const APP_TITLE = 'JINRO MEMO'
 const HELP_ITEMS = [
   '参加者を追加し、盤面整理表で吊り・噛み・役職結果を入力します。',
   '投票記録では投票者を選んでから投票先をクリックして記録します。',
@@ -1390,7 +1391,7 @@ function App() {
 
         <div className="header-brand">
           <div className="brand-icon" aria-hidden="true">
-            <span />
+            <img src={jinroIcon} alt="" />
           </div>
           <div className="brand-text">
             <strong>{APP_TITLE}</strong>
