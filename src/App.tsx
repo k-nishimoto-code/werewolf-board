@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from 'react'
+﻿import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import './App.css'
 
 import {
@@ -65,6 +65,14 @@ const ROLE_LABELS: Record<RoleKey, string> = {
   medium: '霊媒師',
   guard: '騎士',
 }
+
+const COLOR_MODE_STORAGE_KEY = 'werewolf-board-color-mode'
+const APP_TITLE = 'Werewolf Board'
+const HELP_ITEMS = [
+  '参加者を追加し、盤面整理表で吊り・噛み・役職結果を入力します。',
+  '投票記録では投票者を選んでから投票先をクリックして記録します。',
+  '配信用コメントとフリーメモは配信補助やメモ書きとして自由に使えます。',
+]
 
 const createDayRecord = (): DayRecord => ({
   executedId: '',
@@ -461,8 +469,6 @@ function App() {
   )
   const [activeVoteDayIndex, setActiveVoteDayIndex] = useState(0)
   const [draggingFromId, setDraggingFromId] = useState<string | null>(null)
-  const [dragPointer, setDragPointer] = useState<{ x: number; y: number } | null>(null)
-  const [hoverVoteTargetId, setHoverVoteTargetId] = useState<string | null>(null)
   const [layoutTick, setLayoutTick] = useState(0)
   const [isRunoffPopupOpen, setIsRunoffPopupOpen] = useState(false)
   const [activeRunoffRoundIndex, setActiveRunoffRoundIndex] = useState(0)
@@ -483,12 +489,20 @@ function App() {
   const [streamComment, setStreamComment] = useState('')
   const [freeMemo, setFreeMemo] = useState('')
   const [openResultPickerKey, setOpenResultPickerKey] = useState<string | null>(null)
+  const [isHelpOpen, setIsHelpOpen] = useState(false)
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    if (typeof window === 'undefined') {
+      return false
+    }
+    return window.localStorage.getItem(COLOR_MODE_STORAGE_KEY) === 'dark'
+  })
 
   const voteLinkBoardRef = useRef<HTMLDivElement | null>(null)
   const fromDotRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const toDotRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const importJsonInputRef = useRef<HTMLInputElement | null>(null)
   const streamWindowRef = useRef<Window | null>(null)
+  const helpPopoverRef = useRef<HTMLDivElement | null>(null)
 
   const deadPlayerIds = useMemo(() => {
     const dead = new Set<string>()
@@ -617,6 +631,28 @@ function App() {
     )
   }, [streamOverlayPayload])
 
+  useEffect(() => {
+    document.body.classList.toggle('dark-mode', isDarkMode)
+    window.localStorage.setItem(COLOR_MODE_STORAGE_KEY, isDarkMode ? 'dark' : 'light')
+  }, [isDarkMode])
+
+  useEffect(() => {
+    if (!isHelpOpen) {
+      return
+    }
+
+    const handlePointerDown = (event: MouseEvent): void => {
+      if (!helpPopoverRef.current?.contains(event.target as Node)) {
+        setIsHelpOpen(false)
+      }
+    }
+
+    window.addEventListener('mousedown', handlePointerDown)
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown)
+    }
+  }, [isHelpOpen])
+
   const addParticipant = (): void => {
     setParticipants((prev) => [
       ...prev,
@@ -716,8 +752,6 @@ function App() {
     setIsRunoffPopupOpen(false)
     setActiveRunoffRoundIndex(0)
     setDraggingFromId(null)
-    setDragPointer(null)
-    setHoverVoteTargetId(null)
   }
 
   const uploadJson = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
@@ -1227,18 +1261,29 @@ function App() {
     })
   }
 
-  const startVoteDrag = (fromId: string, event: ReactPointerEvent<HTMLButtonElement>): void => {
+  const selectVoteFrom = (fromId: string): void => {
     if (!aliveIdsOnActiveVoteDay.has(fromId)) {
       return
     }
-    const board = voteLinkBoardRef.current
-    if (board) {
-      const rect = board.getBoundingClientRect()
-      setDragPointer({ x: event.clientX - rect.left, y: event.clientY - rect.top })
+    setDraggingFromId((prev) => (prev === fromId ? null : fromId))
+  }
+
+  const selectVoteTarget = (toId: string): void => {
+    if (
+      !draggingFromId ||
+      toId === draggingFromId ||
+      !aliveIdsOnActiveVoteDay.has(draggingFromId) ||
+      !aliveIdsOnActiveVoteDay.has(toId)
+    ) {
+      return
     }
-    setDraggingFromId(fromId)
-    setHoverVoteTargetId(null)
-    event.preventDefault()
+
+    setVotesByDay((prev) =>
+      prev.map((votes, dayIndex) =>
+        dayIndex === activeVoteDayIndex ? { ...votes, [draggingFromId]: toId } : votes,
+      ),
+    )
+    setDraggingFromId(null)
   }
 
   const cancelVote = (fromId: string): void => {
@@ -1254,51 +1299,7 @@ function App() {
     )
   }
 
-  useEffect(() => {
-    if (!draggingFromId) {
-      return
-    }
-
-    const handlePointerMove = (event: PointerEvent): void => {
-      const board = voteLinkBoardRef.current
-      if (!board) {
-        return
-      }
-      const rect = board.getBoundingClientRect()
-      setDragPointer({ x: event.clientX - rect.left, y: event.clientY - rect.top })
-    }
-
-    const handlePointerUp = (event: PointerEvent): void => {
-      const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null
-      const toNode = target?.closest('[data-vote-to-id]') as HTMLElement | null
-      const toId = toNode?.dataset.voteToId ?? ''
-      if (
-        toId &&
-        toId !== draggingFromId &&
-        aliveIdsOnActiveVoteDay.has(draggingFromId) &&
-        aliveIdsOnActiveVoteDay.has(toId)
-      ) {
-        setVotesByDay((prev) =>
-          prev.map((votes, dayIndex) =>
-            dayIndex === activeVoteDayIndex ? { ...votes, [draggingFromId]: toId } : votes,
-          ),
-        )
-      }
-      setDraggingFromId(null)
-      setDragPointer(null)
-      setHoverVoteTargetId(null)
-    }
-
-    window.addEventListener('pointermove', handlePointerMove)
-    window.addEventListener('pointerup', handlePointerUp)
-    return () => {
-      window.removeEventListener('pointermove', handlePointerMove)
-      window.removeEventListener('pointerup', handlePointerUp)
-    }
-  }, [draggingFromId, aliveIdsOnActiveVoteDay, activeVoteDayIndex])
-
   const voteLines = useMemo(() => {
-    const EDGE_OFFSET = 12
     const board = voteLinkBoardRef.current
     if (!board) {
       return [] as { fromId: string; toId: string; x1: number; y1: number; x2: number; y2: number }[]
@@ -1314,37 +1315,27 @@ function App() {
       }
       const fromRect = fromDot.getBoundingClientRect()
       const toRect = toDot.getBoundingClientRect()
+      const fromCenterX = fromRect.left - boardRect.left + fromRect.width / 2
+      const fromCenterY = fromRect.top - boardRect.top + fromRect.height / 2
+      const toCenterX = toRect.left - boardRect.left + toRect.width / 2
+      const toCenterY = toRect.top - boardRect.top + toRect.height / 2
+      const deltaX = toCenterX - fromCenterX
+      const deltaY = toCenterY - fromCenterY
+      const distance = Math.hypot(deltaX, deltaY)
+      if (distance === 0) {
+        return
+      }
       lines.push({
         fromId,
         toId,
-        x1: fromRect.left - boardRect.left + fromRect.width / 2 + EDGE_OFFSET,
-        y1: fromRect.top - boardRect.top + fromRect.height / 2,
-        x2: toRect.left - boardRect.left + toRect.width / 2 - EDGE_OFFSET,
-        y2: toRect.top - boardRect.top + toRect.height / 2,
+        x1: fromCenterX,
+        y1: fromCenterY,
+        x2: toCenterX,
+        y2: toCenterY,
       })
     })
     return lines
   }, [currentDayVotes, layoutTick, activeVoteDayIndex, participants])
-
-  const previewLine = useMemo(() => {
-    const EDGE_OFFSET = 12
-    if (!draggingFromId || !dragPointer) {
-      return null
-    }
-    const board = voteLinkBoardRef.current
-    const fromDot = fromDotRefs.current[draggingFromId]
-    if (!board || !fromDot) {
-      return null
-    }
-    const boardRect = board.getBoundingClientRect()
-    const fromRect = fromDot.getBoundingClientRect()
-    return {
-      x1: fromRect.left - boardRect.left + fromRect.width / 2 + EDGE_OFFSET,
-      y1: fromRect.top - boardRect.top + fromRect.height / 2,
-      x2: dragPointer.x,
-      y2: dragPointer.y,
-    }
-  }, [draggingFromId, dragPointer, layoutTick])
 
   const openStreamWindow = (): void => {
     const url = new URL(window.location.href)
@@ -1374,36 +1365,81 @@ function App() {
 
   return (
     <main className="app">
-      <div className="top-right-actions">
-        <button
-          type="button"
-          className="mini-action-btn"
-          onClick={openStreamWindow}
-        >
-          配信用ウィンドウ
-        </button>
-        <button
-          type="button"
-          className="mini-action-btn"
-          onClick={() => importJsonInputRef.current?.click()}
-        >
-          JSON読込
-        </button>
-        <button
-          type="button"
-          className="mini-action-btn"
-          onClick={openExportPopup}
-        >
-          JSON保存
-        </button>
-        <input
-          ref={importJsonInputRef}
-          type="file"
-          accept="application/json,.json"
-          onChange={uploadJson}
-          className="hidden-file-input"
-        />
-      </div>
+      <header className="app-header">
+        <div className="header-help" ref={helpPopoverRef}>
+          <button
+            type="button"
+            className="header-icon-button"
+            aria-label="使い方を表示"
+            aria-expanded={isHelpOpen}
+            onClick={() => setIsHelpOpen((prev) => !prev)}
+          >
+            ?
+          </button>
+          {isHelpOpen && (
+            <div className="help-popover">
+              <h2>使い方</h2>
+              <ul>
+                {HELP_ITEMS.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+
+        <div className="header-brand">
+          <div className="brand-icon" aria-hidden="true">
+            <span />
+          </div>
+          <div className="brand-text">
+            <strong>{APP_TITLE}</strong>
+            <span>人狼盤面・投票メモ</span>
+          </div>
+        </div>
+
+        <div className="header-actions">
+          <button
+            type="button"
+            className="mini-action-btn"
+            onClick={openStreamWindow}
+          >
+            配信用ウィンドウ
+          </button>
+          <button
+            type="button"
+            className="mini-action-btn"
+            onClick={() => importJsonInputRef.current?.click()}
+          >
+            読み込み
+          </button>
+          <button
+            type="button"
+            className="mini-action-btn"
+            onClick={openExportPopup}
+          >
+            保存
+          </button>
+          <button
+            type="button"
+            className="theme-toggle"
+            aria-label={isDarkMode ? 'ライトモードに切り替え' : 'ナイトモードに切り替え'}
+            onClick={() => setIsDarkMode((prev) => !prev)}
+          >
+            <span className={`theme-toggle-icon sun ${isDarkMode ? 'is-hidden' : ''}`}>☀</span>
+            <span className={`theme-toggle-icon moon ${isDarkMode ? '' : 'is-hidden'}`}>☾</span>
+          </button>
+          <input
+            ref={importJsonInputRef}
+            type="file"
+            accept="application/json,.json"
+            onChange={uploadJson}
+            className="hidden-file-input"
+          />
+        </div>
+      </header>
+
+      <div className="app-layout">
       <aside className="sidebar">
         <h2>参加者</h2>
         <ul className="participant-list">
@@ -1430,7 +1466,7 @@ function App() {
         </div>
       </aside>
 
-      <div className="main-column">
+      <div className="content-column">
       <section className="board">
         <div className="board-header">
           <h1>盤面整理表</h1>
@@ -1672,7 +1708,6 @@ function App() {
                   setActiveVoteDayIndex(index)
                   setActiveRunoffRoundIndex(0)
                   setDraggingFromId(null)
-                  setHoverVoteTargetId(null)
                 }}
               >
                 {index + 1}日目
@@ -1694,15 +1729,6 @@ function App() {
                   className="vote-link-line"
                 />
               ))}
-              {previewLine && (
-                <line
-                  x1={previewLine.x1}
-                  y1={previewLine.y1}
-                  x2={previewLine.x2}
-                  y2={previewLine.y2}
-                  className="vote-link-line is-preview"
-                />
-              )}
             </svg>
 
             <div className="vote-link-columns">
@@ -1719,15 +1745,16 @@ function App() {
                     </button>
                     <button
                       type="button"
-                      className={`vote-link-dot ${draggingFromId === player.id ? 'is-active' : ''}`}
-                      onPointerDown={(event) => startVoteDrag(player.id, event)}
+                      className={`vote-link-dot ${
+                        draggingFromId === player.id || currentDayVotes[player.id] ? 'is-active' : ''
+                      }`}
+                      onClick={() => selectVoteFrom(player.id)}
                       ref={(element) => {
                         fromDotRefs.current[player.id] = element
                       }}
-                      title="投票先へドラッグ"
-                    >
-                      ●
-                    </button>
+                      title="クリックして投票先を選択"
+                      aria-label={`${player.name}を投票者として選択`}
+                    />
                   </div>
                 ))}
               </div>
@@ -1737,28 +1764,19 @@ function App() {
                 {alivePlayersOnActiveVoteDay.map((player) => (
                   <div
                     key={`to-${player.id}`}
-                    className={`vote-link-row is-to ${hoverVoteTargetId === player.id ? 'is-hover-target' : ''}`}
+                    className={`vote-link-row is-to ${draggingFromId && draggingFromId !== player.id ? 'is-hover-target' : ''}`}
                   >
                     <button
                       type="button"
-                      className="vote-link-dot"
+                      className={`vote-link-dot ${firstVoteCounts[player.id] ? 'is-active' : ''}`}
                       data-vote-to-id={player.id}
                       ref={(element) => {
                         toDotRefs.current[player.id] = element
                       }}
-                      onPointerEnter={() => {
-                        if (draggingFromId && draggingFromId !== player.id) {
-                          setHoverVoteTargetId(player.id)
-                        }
-                      }}
-                      onPointerLeave={() => {
-                        if (hoverVoteTargetId === player.id) {
-                          setHoverVoteTargetId(null)
-                        }
-                      }}
-                    >
-                      ●
-                    </button>
+                      onClick={() => selectVoteTarget(player.id)}
+                      disabled={!draggingFromId || draggingFromId === player.id}
+                      aria-label={`${player.name}に投票`}
+                    />
                     <span>{player.name}</span>
                   </div>
                 ))}
@@ -1835,6 +1853,9 @@ function App() {
           </div>
         )}
       </section>
+      </div>
+
+      <div className="side-column">
       <section className="stream-comment">
         <h2>配信用コメント</h2>
         <textarea
@@ -1853,6 +1874,7 @@ function App() {
           rows={18}
         />
       </section>
+      </div>
       </div>
 
       {isRunoffPopupOpen && needsFirstRunoff && activeRunoffDay && (

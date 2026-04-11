@@ -3,6 +3,36 @@
   line-height: 1.5;
   color: #0f172a;
   background: #f1f5f9;
+  --app-bg: #f1f5f9;
+  --app-text: #0f172a;
+  --panel-bg: #ffffff;
+  --panel-border: #cbd5e1;
+  --soft-surface: #f8fafc;
+  --soft-surface-strong: #eef2f6;
+  --button-bg: #ffffff;
+  --button-border: #94a3b8;
+  --button-text: #1e293b;
+  --button-hover-bg: #f1f5f9;
+  --muted-text: #64748b;
+  --placeholder-text: #94a3b8;
+  --grid-border: #d5dde7;
+  --empty-surface: #ffffff;
+  --selected-bg: #e5e7eb;
+  --selected-border: #111827;
+  --selected-text: #111827;
+  --line-color: #111111;
+  --overlay-bg: rgba(15, 23, 42, 0.45);
+  --shadow-soft: 0 10px 28px rgba(15, 23, 42, 0.08);
+  --shadow-strong: 0 12px 30px rgba(15, 23, 42, 0.14);
+  --shadow-floating: 0 8px 18px rgba(15, 23, 42, 0.12);
+  --dead-bg: #edf1f5;
+  --dead-text: #64748b;
+  --danger: #dc2626;
+  --danger-soft: #fff1f2;
+  --danger-border: #f5b4bd;
+  --brand-grad-start: #2b313b;
+  --brand-grad-end: #111827;
+  --brand-mark: #ffffff;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -16,7 +46,42 @@
 body {
   margin: 0;
   min-width: 320px;
-  background: #f1f5f9;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-size: 0.8rem;
+}
+
+body.dark-mode {
+  --app-bg: #0f172a;
+  --app-text: #e2e8f0;
+  --panel-bg: #111827;
+  --panel-border: #334155;
+  --soft-surface: #1e293b;
+  --soft-surface-strong: #243142;
+  --button-bg: #111827;
+  --button-border: #475569;
+  --button-text: #e2e8f0;
+  --button-hover-bg: #1e293b;
+  --muted-text: #94a3b8;
+  --placeholder-text: #7f8ea3;
+  --grid-border: #334155;
+  --empty-surface: #16202d;
+  --selected-bg: #374151;
+  --selected-border: #e5e7eb;
+  --selected-text: #f8fafc;
+  --line-color: #f8fafc;
+  --overlay-bg: rgba(2, 6, 23, 0.72);
+  --shadow-soft: 0 10px 28px rgba(2, 6, 23, 0.28);
+  --shadow-strong: 0 12px 30px rgba(2, 6, 23, 0.42);
+  --shadow-floating: 0 8px 18px rgba(2, 6, 23, 0.34);
+  --dead-bg: #202b39;
+  --dead-text: #94a3b8;
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.12);
+  --danger-border: rgba(248, 113, 113, 0.35);
+  --brand-grad-start: #d1d5db;
+  --brand-grad-end: #6b7280;
+  --brand-mark: #111827;
 }
 
 button,
